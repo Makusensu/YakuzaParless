@@ -28,7 +28,7 @@ static HMODULE hDLLModule;
 
 namespace Parless
 {
-	const char* VERSION = "2.2.2";
+	const char* VERSION = "2.2.6";
 	
 	t_CriBind(*hook_BindCpk);
 	t_CriBind org_BindCpk = NULL;
@@ -51,7 +51,6 @@ namespace Parless
 
 	std::vector<string> mods;
 	stringmap gameMap;
-	stringmap fileModMap;
 	unordered_map<string, vector<string>> cpkModMap;
 
 	const int DIR_WORKSIZE = 0x58;
@@ -70,6 +69,7 @@ namespace Parless
 	bool loadParless;
 	bool rebuildMLO;
 	bool enableReload;
+	bool v5fsArcade;
 
 	// Mod paths will be relative to the ASI's directory instead of the game's directory (to support undumped UWP games)
 	bool isUwp;
@@ -77,26 +77,6 @@ namespace Parless
 	bool isGOG;
 
 	bool hasRepackedPars;
-
-	class loggingStream {
-		std::mutex m;
-		std::ofstream o;
-	public:
-		explicit loggingStream() {};
-		_Acquires_lock_(this->m) void lock() {
-			this->m.lock();
-		}
-
-		_Releases_lock_(this->m) void unlock() {
-			this->m.unlock();
-		}
-
-		std::ofstream& operator*() {
-			return this->o;
-		}
-
-	};
-
 	// Logging streams
 	loggingStream modOverrides;
 	loggingStream parlessOverrides;
@@ -227,9 +207,9 @@ namespace Parless
 				string dataPath_lowercase = dataPath;
 				std::for_each(dataPath_lowercase.begin(), dataPath_lowercase.end(), [](char& w) { w = std::tolower(w); });
 
-				stringmap::const_iterator match = fileModMap.find(dataPath_lowercase);
+				stringmap::const_iterator match = currentParlessGame->fileModMap.find(dataPath_lowercase);
 
-				if (match != fileModMap.end())
+				if (match != currentParlessGame->fileModMap.end())
 				{
 					override = path;
 
@@ -492,7 +472,7 @@ void ReadModLoadOrder()
 			name = new char[length];
 			mlo.read(name, length);
 
-			fileModMap[string(name)] = mods[index];
+			currentParlessGame->fileModMap[string(name)] = mods[index];
 			delete[] name;
 		}
 
@@ -540,7 +520,7 @@ void InitializeScripts()
 	typedef int(__stdcall* asi_init)();
 
 	//Iterate the filemap for any ASI scripts. Then load them
-	for (auto it = Parless::fileModMap.begin(); it != Parless::fileModMap.end(); it++) {
+	for (auto it = Parless::currentParlessGame->fileModMap.begin(); it != Parless::currentParlessGame->fileModMap.end(); it++) {
 
 		if (endsWith(it->first, ".asi"))
 		{
@@ -625,6 +605,7 @@ void Reload()
 	ReadModLoadOrder();
 	cout << "DONE!\n";
 
+
 	//ASI Script reloading is not supported
 
 	// These maps are filled after reading the MLO
@@ -633,7 +614,7 @@ void Reload()
 		cout << "No \".parless\" paths were found in the MLO.\n";
 		loadParless = false;
 	}
-	if (!fileModMap.size())
+	if (!Parless::currentParlessGame->fileModMap.size())
 	{
 		cout << "No mod files were found in the MLO.\n";
 		loadMods = false;
@@ -720,7 +701,8 @@ void OnInitializeHook()
 	loadParless = GetPrivateProfileIntW(L"Overrides", L"LooseFilesEnabled ", 1, wcModulePath);
 	loadMods = GetPrivateProfileIntW(L"Overrides", L"ModsEnabled", 1, wcModulePath);
 	rebuildMLO = GetPrivateProfileIntW(L"Overrides", L"RebuildMLO", 0, wcModulePath);
-	enableReload = GetPrivateProfileIntW(L"Debug", L"EnableReload", 0, wcModulePath);
+	enableReload = GetPrivateProfileIntW(L"Debug", L"ReloadingEnabled", 0, wcModulePath);
+	v5fsArcade = GetPrivateProfileIntW(L"Debug", L"V5FSArcadeSupport", 0, wcModulePath);
 
 	int localeValue = GetPrivateProfileIntW(L"Overrides", L"Locale", 0, wcModulePath);
 
@@ -786,6 +768,14 @@ void OnInitializeHook()
 	currentParlessGame->isGOG = isGOG;
 	currentParlessGame->parless_rename_func = &RenameFilePaths;
 	currentParlessGame->parless_cpk_bind_path_func = &BindCpkPaths;
+	currentParlessGame->logAll = logAll;
+	currentParlessGame->logMods = logMods;
+	currentParlessGame->logParless;
+	currentParlessGame->modOverrides = &modOverrides;
+	currentParlessGame->parlessOverrides = &parlessOverrides;
+	currentParlessGame->allFilepaths = &allFilepaths;
+	CBaseParlessGame::instance = currentParlessGame;
+
 	currentParlessGame->init();
 
 	cout << "YakuzaParless v" << VERSION << "\n\n";
@@ -849,6 +839,17 @@ void OnInitializeHook()
 		{
 			cout << "Minhook initialization failed. Aborting.\n";
 			return;
+		}
+
+		//V5FS
+		if (currentGame >= Game::Yakuza6)
+		{
+			CBaseParlessGameDE* deGame = (CBaseParlessGameDE*)currentParlessGame;
+
+			if (deGame->enable_vf5fs_support(v5fsArcade))
+			{
+				deGame->v5fs_procedure();
+			}
 		}
 		
 		//UBIK time
@@ -937,7 +938,10 @@ extern "C"
 
 	__declspec(dllexport) unsigned int YP_GET_NUM_MOD_FILES()
 	{
-		return Parless::fileModMap.size();
+		if (Parless::currentParlessGame == nullptr)
+			return 0;
+
+		return Parless::currentParlessGame->fileModMap.size();
 	}
 
 
@@ -954,7 +958,10 @@ extern "C"
 		if (fileIdx > YP_GET_NUM_MODS())
 			return "";
 
-		auto it = Parless::fileModMap.begin();
+		if (Parless::currentParlessGame == nullptr)
+			return "";
+
+		auto it = Parless::currentParlessGame->fileModMap.begin();
 		std::advance(it, fileIdx);
 
 		return it->first.c_str();
